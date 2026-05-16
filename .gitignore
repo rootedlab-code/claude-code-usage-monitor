@@ -1,0 +1,48 @@
+# ===== Secrets =====
+firmware/src/secrets.h
+.env
+.env.local
+*.pem
+*.key
+
+# ===== PlatformIO =====
+.pio/
+.pioenvs/
+.piolibdeps/
+.clang_complete
+.gcc-flags.json
+
+# ===== Build artifacts =====
+*.bin
+*.elf
+*.hex
+*.map
+build/
+dist/
+
+# ===== Python (bridge) =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ===== IDE / editor =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== Logs / runtime =====
+*.log
+/tmp/bridge.log
+nohup.out
+
+# ===== OS =====
+.directory
+desktop.ini
