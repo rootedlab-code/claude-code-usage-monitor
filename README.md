@@ -91,13 +91,24 @@ on GPIO 38 mirrors that state and flashes purple on each successful poll.
 
 ## Quick start
 
+> **Platform support**: developed and tested on **Linux**. The bridge uses
+> only the Python 3.10+ standard library and PlatformIO is cross-platform,
+> so the project is designed to work on **Windows and macOS** as well — the
+> only differences are firewall config, the Python launcher (`py` vs
+> `python3`), and serial port naming (`COMx` vs `/dev/ttyACM0`). See the
+> per-step OS notes below.
+
 ### 1. Run the bridge on your computer
 
 ```bash
-git clone https://github.com/<you>/claude-code-usage-monitor
+git clone https://github.com/rootedlab-code/claude-code-usage-monitor
 cd claude-code-usage-monitor/bridge
-python3 bridge.py --plan max5
 ```
+
+| OS | Command |
+|---|---|
+| Linux / macOS | `python3 bridge.py --plan max5` |
+| Windows (PowerShell or cmd) | `py bridge.py --plan max5` |
 
 Output (look for the IP — you'll need it):
 
@@ -113,30 +124,61 @@ Sanity check it works:
 
 ```bash
 curl -s http://localhost:8787/usage | python3 -m json.tool
+# Windows PowerShell:
+# (Invoke-WebRequest http://localhost:8787/usage).Content | ConvertFrom-Json
 ```
 
-### 2. Open the firewall (Linux iptables example)
+> The bridge reads `~/.claude/projects/**/*.jsonl` via `pathlib.Path.home()`,
+> which resolves to `/home/<user>/...` on Linux/macOS and
+> `C:\Users\<user>\...` on Windows. No code change needed.
 
-The ESP32 needs to reach your computer on port 8787:
+### 2. Open the firewall
 
+The ESP32 needs to reach your computer on port 8787.
+
+**Linux:**
 ```bash
 sudo iptables -I INPUT -p tcp --dport 8787 -j ACCEPT
-# or for ufw:    sudo ufw allow 8787/tcp
-# or firewalld:  sudo firewall-cmd --add-port=8787/tcp
+# or for ufw:     sudo ufw allow 8787/tcp
+# or firewalld:   sudo firewall-cmd --add-port=8787/tcp
+```
+
+**macOS:** the built-in Application Firewall does not block inbound TCP for
+local Python processes by default. If it prompts you, click "Allow".
+
+**Windows** (run as Administrator):
+```powershell
+netsh advfirewall firewall add rule name="Claude Bridge" dir=in action=allow protocol=TCP localport=8787
 ```
 
 ### 3. Build and flash the firmware
 
 Install [PlatformIO Core](https://platformio.org/install/cli) (recommended)
 or the [PlatformIO VS Code extension](https://platformio.org/install/ide?install=vscode).
+Both work on Windows, Linux, and macOS.
 
 ```bash
 cd ../firmware
-cp src/secrets.h.template src/secrets.h
-$EDITOR src/secrets.h     # fill WIFI_SSID, WIFI_PASS, BRIDGE_HOST
+```
+
+Create your `secrets.h`:
+
+| OS | Command |
+|---|---|
+| Linux / macOS | `cp src/secrets.h.template src/secrets.h` |
+| Windows (cmd) | `copy src\secrets.h.template src\secrets.h` |
+| Windows (PowerShell) | `Copy-Item src\secrets.h.template src\secrets.h` |
+
+Edit `src/secrets.h` and fill `WIFI_SSID`, `WIFI_PASS`, `BRIDGE_HOST`. Then:
+
+```bash
 pio run -t upload
 pio device monitor        # 115200 baud — should log "WiFi connected"
 ```
+
+> On Windows the ESP32-S3 appears as `COM3`, `COM4`, etc. — `pio` auto-detects
+> it. The native USB-CDC driver is included in Windows 10/11; no extra driver
+> needed.
 
 If the upload fails: hold **BOOT**, tap **RESET**, release **RESET**, release
 **BOOT** to enter download mode, then retry.
@@ -181,7 +223,9 @@ Edit `bridge/pricing.json` (USD per million tokens). Models are matched by
 prefix, so `claude-opus-4-7-20251201` falls back to `claude-opus-4-7`. The
 `_default` entry is used for unknown models.
 
-### Auto-start the bridge (Linux systemd user service)
+### Auto-start the bridge
+
+**Linux (systemd user service):**
 
 ```ini
 # ~/.config/systemd/user/claude-bridge.service
@@ -199,6 +243,18 @@ WantedBy=default.target
 ```bash
 systemctl --user enable --now claude-bridge.service
 ```
+
+**macOS (launchd):** create `~/Library/LaunchAgents/com.user.claude-bridge.plist`
+with a `ProgramArguments` array pointing at `python3` + the script path, then
+`launchctl load ~/Library/LaunchAgents/com.user.claude-bridge.plist`.
+
+**Windows (Task Scheduler):**
+```powershell
+$action  = New-ScheduledTaskAction -Execute "py" -Argument "C:\path\to\claude-code-usage-monitor\bridge\bridge.py --plan max5"
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+Register-ScheduledTask -TaskName "ClaudeBridge" -Action $action -Trigger $trigger -RunLevel Limited
+```
+Or place a `claude-bridge.bat` shortcut in `shell:startup` (`Win+R` → `shell:startup`).
 
 ## How it works
 
