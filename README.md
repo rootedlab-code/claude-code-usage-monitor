@@ -82,24 +82,38 @@ USB connector to one side — 320×172 effective landscape):
 | ![today and month cost](docs/screenshots/display-cost.jpg) | ![last 7 days bar chart](docs/screenshots/display-7days.jpg) | ![per-model cost](docs/screenshots/display-models.jpg) |
 | `OGGI $58.01` / `MESE $193.40` | `ULTIMI 7 GIORNI` with auto-scaled bars | `Opus 4.7` vs `Haiku 4.5` with proportional bars |
 
-Status bar at the top is always visible (`● ONLINE` + bridge endpoint), and
-the onboard RGB LED mirrors the connection state.
+> Photos are from v0.1. v0.2 keeps the same overall layout but adds a boot
+> splash, a unified accent palette (green / cyan / amber / red / violet),
+> icons in every tab header, a sparkline + "ieri" line on the cost tab, and
+> dual progress bars on the 5h tab. New screenshots coming soon.
 
-The four views auto-rotate every 6 seconds:
+Status bar at the top is always visible (`WIFI ONLINE` / `WIFI OFFLINE` with
+status dot + bridge endpoint), and the onboard RGB LED mirrors connection
+state.
 
-1. **Costo** — `OGGI $X` (large, green) and `MESE $Y`, with `updated Xs ago` footer.
-2. **Finestra 5h** *(the important one)* — current usage of the 5-hour rolling
-   rate-limit window as a single big percentage (green / orange / red at
-   70 % / 90 % thresholds), `$cost / $plan_limit`, `N msg | out tokens`, a
-   progress bar, and `reset tra Xh Ym` countdown.
+The four views auto-rotate every 6 seconds (you can also navigate manually
+via the BOOT button — see *Captive portal & button* below):
+
+1. **Costo** — `OGGI $X` (large, green) above a sparkline of the last 7 days,
+   `ieri $Y` line, divider, `MESE $Z`, and `updated Xs ago` footer.
+2. **Finestra 5h** *(the important one)* — current usage of the 5-hour
+   rolling rate-limit window:
+   - Big percentage label (green / amber / red at 70 % / 90 % thresholds).
+   - `$cost / $plan_limit` and `N msg | out tokens` compact line.
+   - **Two labeled bars**: `Tempo` (violet, 0–300 min elapsed) and `Limite`
+     (green→amber→red, 0–100 % of plan limit).
+   - **ETA-to-limit** (when burning at non-trivial rate): amber under 60 min,
+     red under 30 min. Hidden when the window won't actually hit the cap.
+   - `reset tra Xh Ym` countdown at the bottom.
 3. **Ultimi 7 giorni** — bar chart of daily cost over the past week,
    auto-scaled, today is the rightmost bar.
 4. **Modelli (mese)** — top 5 models for the month with cost and a
    proportional cyan bar.
 
-The status bar at the top of every view shows `●` (green ONLINE / red
-OFFLINE), the bridge state, and your ESP32's LAN IP. The onboard RGB LED
-on GPIO 38 mirrors that state and flashes purple on each successful poll.
+The status bar shows a colored dot (green ONLINE / red OFFLINE) + `WIFI`
+icon + status text + the ESP32's LAN IP. The onboard RGB LED on GPIO 38
+mirrors that state and flashes purple on each successful poll. In setup
+mode (captive portal) the LED is steady blue.
 
 ## Quick start
 
@@ -133,7 +147,8 @@ Claude Code Usage Bridge avviato
   limite 5h:    200.00 USD (max5)
   ...
   auth:         bearer (token persistito in ~/.claude-code-usage/token)
-  token:        aBcDeFgHiJ...xyz
+  token:        aBcDeFgHiJkLmN...rStUvWxYz
+  short:        aBcD...wXYz
 ```
 
 Sanity check it works:
@@ -223,9 +238,11 @@ running. NVS is wiped and you're back at the AP form.
 
 ### 5. Watch the display
 
-Within ~5 seconds of boot you should see numbers populate. The status dot
-goes green and the RGB LED blinks purple on each successful poll. Use BOOT
-button gestures to navigate manually (see *Captive portal & button* below).
+Boot order: a 2-second splash ("Claude Code Usage v0.2.0") with state line,
+WiFi connect (~1–3 s), first bridge fetch — total **~5–10 seconds** until
+numbers populate. The status dot goes green and the RGB LED blinks purple on
+each successful poll. Use BOOT button gestures to navigate manually (see
+*Captive portal & button* below).
 
 ## Configuration
 
@@ -353,12 +370,28 @@ nginx/Caddy). Report vulnerabilities to **rootedlab@proton.me**.
 
 ### Firmware
 
-- **`Wireless`** — WiFi STA mode with `WiFiEvent` auto-reconnect.
+- **`Config`** — runtime config in NVS via `Preferences` (namespace
+  `cc-monitor`). Reads on boot, falls back to `secrets.h` defines when keys
+  are empty — so source builds keep working without setup AP. Persists
+  WiFi creds, bridge host/port/token, poll interval, auto-rotate preference.
+- **`Portal`** — captive portal for first-boot provisioning: `WiFi.softAP`
+  named `ClaudeMonitor-XXYY` (last 4 hex of MAC), `DNSServer` catch-all to
+  `192.168.4.1`, `WebServer` serving a small HTML form (`/`, `/scan`,
+  `/save`). 302-redirect on `onNotFound` triggers the captive popup on iOS,
+  Android, and modern Windows.
+- **`Wireless`** — WiFi STA mode with `WiFiEvent` auto-reconnect plus a
+  persistent-failure counter (3 disconnects in 30 s without a recovery
+  triggers a drop into portal mode).
+- **`Button`** — debounced state machine for the BOOT button (GPIO 0,
+  polled, never via ISR because GPIO 0 doubles as the ROM-bootloader strap).
+  Emits `TAP` / `LONG` / `VERY_LONG` events.
 - **`UsageClient`** — FreeRTOS task pinned to core 0, polls the bridge every
-  5 s via `HTTPClient`, parses with `ArduinoJson` v7, stores in a shared
-  struct guarded by `xSemaphoreCreateMutex()`.
-- **`UsageUI`** — LVGL 8.3 on core 1. Four `lv_obj_t` panels (one visible
-  at a time, swapped via `lv_obj_add_flag(LV_OBJ_FLAG_HIDDEN)` by a 6 s timer).
+  N ms (default 5 s) via `HTTPClient` with `Authorization: Bearer <token>`,
+  parses with `ArduinoJson` v7, stores in a shared struct guarded by
+  `xSemaphoreCreateMutex()`. Logs 401 explicitly when the token is wrong.
+- **`UsageUI`** — LVGL 8.3 on core 1. Boot splash, 4 main panels swapped
+  with `lv_obj_fade_in/out` (180/200 ms transitions, one-shot timers for
+  the hide step), portal full-screen overlay, toast helper, status bar.
   UI refresh from the snapshot runs every 400 ms in `loop()`.
 - **`Display_ST7789`** — original Waveshare driver, patched for both
   arduino-esp32 2.0.x and 3.x LEDC APIs (backlight PWM).

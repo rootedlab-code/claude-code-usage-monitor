@@ -497,7 +497,8 @@ def main():
         print(f"    #define BRIDGE_TOKEN  \"{token}\"")
         print()
         print(f"Test rapido:")
-        print(f"    curl -H 'Authorization: Bearer {short}' http://{ip}:{args.port}/usage")
+        print(f"    TOK={token}")
+        print(f"    curl -H \"Authorization: Bearer $TOK\" http://{ip}:{args.port}/usage")
     else:
         print(f"  auth:         DISABILITATA (--no-auth)")
         print(f"  WARNING: chiunque sulla rete può leggere il tuo consumo Claude Code.")
