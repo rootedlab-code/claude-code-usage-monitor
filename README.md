@@ -30,18 +30,30 @@ WiFi and renders four LVGL views on a 172×320 TFT.
 
 - **5-hour window tracker** with countdown — closely matches the official
   Anthropic dashboard (within a few percent / few minutes).
-- **Cost views**: today, this month, 7-day bar chart, top-N model breakdown.
+- **Cost views**: today + yesterday + 7-day sparkline trend, this month, full
+  7-day bar chart, top-N model breakdown.
+- **Dual progress bars on the 5h tab**: time elapsed (purple) and limit
+  used (green→amber→red), so the two axes never get confused.
+- **ETA-to-limit projection** — extrapolates when you'd hit the cap at the
+  current burn rate; turns red under 30 minutes.
 - **Plan-aware**: pick `pro` / `max5` / `max20` or set a custom limit.
 - **Pricing configurable** via `pricing.json` (USD per million tokens).
 - **No cloud dependency**: bridge reads local transcript files; nothing leaves
   your LAN.
+- **Secured by default** (v0.2): bearer-token auth on `/usage` and `/metrics`,
+  token generated on first run and persisted with mode 0600.
+- **Prometheus `/metrics` endpoint** for Grafana scraping.
+- **Captive portal provisioning** (v0.2): no recompile to change WiFi /
+  bridge / token — first boot or BOOT-button reset opens a setup AP.
+- **BOOT button gestures**: tap = next tab, long-press = toggle auto-rotate,
+  very-long-press = reset NVS.
 - **Robust**: dedup by `message.id` (Claude Code rewrites the same assistant
   message multiple times during tool calls — naive parsers count it 2-5×);
   anchors window start on the first `user` message (matching Anthropic's
   request-time accounting, not completion-time).
 - **Auto-reconnect WiFi**, **OFFLINE indicator**, **last value persists** on
-  bridge outage.
-- ~33 % RAM, ~18 % flash on ESP32-S3 (8 MB PSRAM, 16 MB flash).
+  bridge outage. Persistent WiFi failure falls back into setup AP.
+- ~33 % RAM, ~19 % flash on ESP32-S3 (8 MB PSRAM, 16 MB flash).
 
 ## Hardware
 
@@ -110,7 +122,8 @@ cd claude-code-usage-monitor/bridge
 | Linux / macOS | `python3 bridge.py --plan max5` |
 | Windows (PowerShell or cmd) | `py bridge.py --plan max5` |
 
-Output (look for the IP — you'll need it):
+Output (write down the **IP** and **token** — you'll paste them into the
+ESP32 setup form):
 
 ```
 Claude Code Usage Bridge avviato
@@ -118,15 +131,22 @@ Claude Code Usage Bridge avviato
   IP locale:    http://192.168.1.42:8787/usage
   budget mese:  500.00 USD
   limite 5h:    200.00 USD (max5)
+  ...
+  auth:         bearer (token persistito in ~/.claude-code-usage/token)
+  token:        aBcDeFgHiJ...xyz
 ```
 
 Sanity check it works:
 
 ```bash
-curl -s http://localhost:8787/usage | python3 -m json.tool
-# Windows PowerShell:
-# (Invoke-WebRequest http://localhost:8787/usage).Content | ConvertFrom-Json
+TOK=$(cat ~/.claude-code-usage/token)
+curl -s -H "Authorization: Bearer $TOK" http://localhost:8787/usage | python3 -m json.tool
+curl -s http://localhost:8787/health    # /health stays anonymous
 ```
+
+Want unauthenticated like v0.1? Use `--no-auth` (warning printed; only for
+trusted local testing). The token is regenerated automatically if you delete
+`~/.claude-code-usage/token`.
 
 > The bridge reads `~/.claude/projects/**/*.jsonl` via `pathlib.Path.home()`,
 > which resolves to `/home/<user>/...` on Linux/macOS and
@@ -161,7 +181,9 @@ Both work on Windows, Linux, and macOS.
 cd ../firmware
 ```
 
-Create your `secrets.h`:
+Create your `secrets.h` — you can leave **all values empty** for v0.2 since
+the captive portal handles them at runtime, or fill them in for a fully
+compile-time config:
 
 | OS | Command |
 |---|---|
@@ -169,11 +191,11 @@ Create your `secrets.h`:
 | Windows (cmd) | `copy src\secrets.h.template src\secrets.h` |
 | Windows (PowerShell) | `Copy-Item src\secrets.h.template src\secrets.h` |
 
-Edit `src/secrets.h` and fill `WIFI_SSID`, `WIFI_PASS`, `BRIDGE_HOST`. Then:
+Then build and flash:
 
 ```bash
 pio run -t upload
-pio device monitor        # 115200 baud — should log "WiFi connected"
+pio device monitor        # 115200 baud
 ```
 
 > On Windows the ESP32-S3 appears as `COM3`, `COM4`, etc. — `pio` auto-detects
@@ -183,10 +205,27 @@ pio device monitor        # 115200 baud — should log "WiFi connected"
 If the upload fails: hold **BOOT**, tap **RESET**, release **RESET**, release
 **BOOT** to enter download mode, then retry.
 
-### 4. Watch the display
+### 4. Provision the device (captive portal)
+
+If you left `secrets.h` empty, the device boots into setup mode:
+
+1. The display shows `Modalità Setup` + AP name `ClaudeMonitor-XXYY` + the
+   URL `http://192.168.4.1`.
+2. On your phone, join the open `ClaudeMonitor-XXYY` network.
+3. Most OS show a captive-portal notification automatically; otherwise open
+   `http://192.168.4.1` in any browser.
+4. Pick your WiFi from the scan dropdown, paste the **bridge IP** and
+   **token** from step 1, hit *Salva e collegati*.
+5. The device reboots, connects, polls the bridge.
+
+To re-enter setup later: **hold BOOT for >5 seconds** while the device is
+running. NVS is wiped and you're back at the AP form.
+
+### 5. Watch the display
 
 Within ~5 seconds of boot you should see numbers populate. The status dot
-goes green and the RGB LED blinks purple on each successful poll.
+goes green and the RGB LED blinks purple on each successful poll. Use BOOT
+button gestures to navigate manually (see *Captive portal & button* below).
 
 ## Configuration
 
@@ -200,6 +239,9 @@ goes green and the RGB LED blinks purple on each successful poll.
 | `--plan-limit`   | (from plan) | Override 5h limit in USD                             |
 | `--budget`       | `500`       | Monthly budget in USD (informative, used in mese)    |
 | `--ttl`          | `2.0`       | In-memory cache TTL in seconds                       |
+| `--token`        | (auto)      | Override bearer token (skip auto-generate/persist)   |
+| `--no-auth`      | off         | Disable auth (warning printed). Don't do this on hostile LANs. |
+| `--metrics-anon` | off         | Allow `/metrics` without auth (for Prometheus)       |
 
 The defaults match Claude **Max 5x**. Override with `--plan max20` or
 `--plan-limit 250` for a custom subscription.
@@ -256,6 +298,40 @@ Register-ScheduledTask -TaskName "ClaudeBridge" -Action $action -Trigger $trigge
 ```
 Or place a `claude-bridge.bat` shortcut in `shell:startup` (`Win+R` → `shell:startup`).
 
+## Captive portal & button reference
+
+### Captive portal triggers
+
+| Trigger | Effect |
+|---|---|
+| Empty NVS **and** empty `secrets.h` at boot | AP `ClaudeMonitor-XXYY` opens, display shows setup screen |
+| Hold **BOOT** for >5 s while running | NVS is cleared, device reboots into setup |
+| WiFi STA fails 3× within 30 s | Drops into AP automatically (typical for wrong password or router off) |
+
+### BOOT button gestures (runtime)
+
+| Gesture | Duration | Action |
+|---|---|---|
+| Tap | <500 ms | Next tab; auto-rotate paused 30 s |
+| Long press | 500 ms – 5 s | Toggle auto-rotate (persisted to NVS) |
+| Very long press | >5 s | Reset NVS → reboot → captive portal |
+
+> Why polling and not interrupts? GPIO 0 is also the ESP32-S3 strap pin for
+> ROM download mode. An ISR is sampled at unfortunate moments during reset/wake.
+> Polling sidesteps this entirely.
+
+> "Hold BOOT at power-on to force setup" is **not** a primary path — holding
+> BOOT during reset puts the chip in download mode instead of running our
+> firmware. Use the runtime very-long-press, or simply clear `secrets.h`.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the full threat model. TL;DR: the bridge
+ships with bearer-token auth on `/usage` and `/metrics` (token at
+`~/.claude-code-usage/token` with mode 0600). Trust boundary is the **LAN**;
+do not expose the bridge to the Internet without TLS in front (e.g.,
+nginx/Caddy). Report vulnerabilities to **rootedlab@proton.me**.
+
 ## How it works
 
 ### Bridge
@@ -293,10 +369,14 @@ Or place a `claude-bridge.bat` shortcut in `shell:startup` (`Win+R` → `shell:s
 claude-code-usage-monitor/
 ├── LICENSE                        GPL v3
 ├── README.md                      this file
+├── SECURITY.md                    threat model + disclosure contact (v0.2)
+├── CHANGELOG.md                   keep-a-changelog (v0.2)
+├── CONTRIBUTING.md                contributor guide (v0.2)
+├── .github/                       issue templates + CI workflow (v0.2)
 ├── .gitignore
 │
 ├── bridge/                        Python — runs on your PC
-│   ├── bridge.py                  HTTP server, JSONL parser, aggregator
+│   ├── bridge.py                  HTTP server + JSONL parser + bearer auth
 │   ├── pricing.json               editable model price table
 │   └── README.md
 │
@@ -304,15 +384,18 @@ claude-code-usage-monitor/
 │   ├── platformio.ini
 │   ├── README.md
 │   └── src/
-│       ├── main.cpp               setup() + loop()
-│       ├── secrets.h.template     copy to secrets.h and edit
+│       ├── main.cpp               setup() + loop() + boot flow
+│       ├── secrets.h.template     fallback config (captive portal is primary path)
 │       ├── lv_conf.h              LVGL config (Montserrat 22/28/32 enabled)
 │       ├── Display_ST7789.{cpp,h} ST7789 SPI driver
 │       ├── LVGL_Driver.{cpp,h}    LVGL init / flush callback
 │       ├── RGB_lamp.{cpp,h}       NeoPixel driver (status LED)
-│       ├── Wireless.{cpp,h}       WiFi STA + reconnect
-│       ├── UsageClient.{cpp,h}    HTTP polling task + JSON parsing
-│       └── UsageUI.{cpp,h}        LVGL UI (4 panels + status bar)
+│       ├── Wireless.{cpp,h}       WiFi STA + reconnect + fail counter
+│       ├── UsageClient.{cpp,h}    HTTP polling task + JSON parsing + auth header
+│       ├── UsageUI.{cpp,h}        LVGL UI: splash, 4 panels, portal, toast (v0.2)
+│       ├── Config.{cpp,h}         NVS-backed runtime config (v0.2)
+│       ├── Portal.{cpp,h}         softAP captive portal + DNSServer + WebServer (v0.2)
+│       └── Button.{cpp,h}         BOOT button debounced state machine (v0.2)
 │
 ├── docs/
 │   └── hardware/                  pin maps, reference notes
@@ -325,14 +408,17 @@ claude-code-usage-monitor/
 
 | Symptom                                | Likely cause / fix                                              |
 |----------------------------------------|-----------------------------------------------------------------|
+| `[UsageClient] HTTP 401`               | Token mismatch. Re-paste the bridge token via captive portal, or check `BRIDGE_TOKEN` in `secrets.h`. |
 | `[UsageClient] HTTP -1` repeating      | Firewall on host. Open port 8787 (see Quick Start §2).          |
-| Status bar stuck on OFFLINE            | Wrong `BRIDGE_HOST` IP; bridge not running; AP isolation on WiFi |
-| WiFi never connects                    | Re-check SSID/password in `secrets.h`. 5 GHz-only networks unsupported. |
+| Status bar stuck on OFFLINE            | Wrong bridge host; bridge not running; AP isolation on WiFi router |
+| Device boots into setup mode unexpectedly | WiFi creds wrong or router off (3× retry → portal). Hold BOOT >5s to wipe NVS and re-provision. |
+| WiFi never connects                    | Re-check SSID/password. 5 GHz-only networks unsupported.        |
 | Build error `ledcAttach not declared`  | arduino-esp32 2.0.x — guard already in code, ensure you're on PIO `espressif32 ≥ 6.x` |
 | `PIN_NEOPIXEL redefined`               | Old core. Confirm `RGB_LED_PIN` is used (not `PIN_NEOPIXEL`).   |
 | Bridge shows costs ~3× too high        | You're on an older bridge.py without dedup. Pull latest.        |
 | 5h window % diverges from dashboard    | Tune `--plan-limit` to match your subscription's real cap.      |
 | Upload fails / can't find /dev/ttyACM0 | Hold BOOT, tap RESET, release RESET, release BOOT.              |
+| Can't reach captive portal AP          | Make sure your phone joined `ClaudeMonitor-XXYY`; manually open `http://192.168.4.1`. |
 
 ## Building from scratch (Arduino IDE alternative)
 
@@ -352,16 +438,18 @@ PlatformIO is recommended but the project also builds in Arduino IDE 2.x:
 
 ## Contributing
 
-Issues and PRs welcome. A few ideas the project hasn't tackled yet:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor guide and
+[CHANGELOG.md](CHANGELOG.md) for release notes.
 
-- mDNS discovery so `secrets.h` doesn't need a hardcoded IP.
+A few ideas the project hasn't tackled yet:
+
+- mDNS discovery so the bridge host can be `claude-bridge.local` instead of an IP.
+- TLS on the bridge (v0.3): self-signed cert + WiFiClientSecure on the ESP32.
 - Weekly limit indicator (Anthropic dashboard exposes both 5h *and* weekly).
-- A captive-portal WiFi provisioning so first-time users skip `secrets.h`
-  altogether.
 - Port to other ESP32-S3 boards (T-Display-S3, M5StickC, etc).
-- Token-based authentication on the bridge for hostile networks.
 - Cost calculation refinement (1h-ephemeral cache pricing, server tool use,
   thinking tokens, ...).
+- BLE-based provisioning as an alternative to softAP captive portal.
 
 When contributing, please run the bridge once with your own transcripts and
 include the corrected output in the PR description if the change affects
