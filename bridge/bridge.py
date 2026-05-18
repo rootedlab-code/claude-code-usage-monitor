@@ -12,8 +12,10 @@ Solo stdlib Python 3.10+. Avvio:
 import argparse
 import datetime as dt
 import glob
+import hmac
 import json
 import os
+import secrets as _secrets
 import socket
 import sys
 import threading
@@ -23,6 +25,8 @@ from pathlib import Path
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 DEFAULT_PRICING_FILE = Path(__file__).parent / "pricing.json"
+TOKEN_DIR = Path.home() / ".claude-code-usage"
+TOKEN_PATH = TOKEN_DIR / "token"
 
 # USD per 1M tokens. Editabile via pricing.json.
 DEFAULT_PRICING = {
@@ -294,7 +298,67 @@ class CachedAggregator:
             return data
 
 
-def make_handler(cache: CachedAggregator):
+def load_or_create_token(explicit: str | None) -> str:
+    """Restituisce un bearer token persistente in ~/.claude-code-usage/token.
+
+    Se `explicit` è fornito, lo usa direttamente (e non salva). Altrimenti
+    carica il file se esiste, oppure ne genera uno nuovo (24 bytes urlsafe).
+    Best-effort chmod 0600 sul file e 0700 sulla directory.
+    """
+    if explicit:
+        return explicit
+    if TOKEN_PATH.exists():
+        try:
+            tok = TOKEN_PATH.read_text().strip()
+            if tok:
+                return tok
+        except OSError:
+            pass
+    tok = _secrets.token_urlsafe(24)
+    try:
+        TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+        TOKEN_PATH.write_text(tok)
+    except OSError as e:
+        print(f"[warn] impossibile salvare token in {TOKEN_PATH}: {e}")
+        return tok
+    try:
+        os.chmod(TOKEN_PATH, 0o600)
+        os.chmod(TOKEN_DIR, 0o700)
+    except OSError:
+        pass  # Windows / FS non-POSIX: best-effort
+    return tok
+
+
+def constant_time_eq(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+def render_metrics(data: dict) -> bytes:
+    w = data.get("window5h") or {}
+    today = data.get("today") or {}
+    month = data.get("month") or {}
+    lines = [
+        "# HELP cc_cost_today_usd Total cost USD today",
+        "# TYPE cc_cost_today_usd gauge",
+        f'cc_cost_today_usd {float(today.get("cost_usd", 0.0))}',
+        "# HELP cc_cost_month_usd Total cost USD month-to-date",
+        "# TYPE cc_cost_month_usd gauge",
+        f'cc_cost_month_usd {float(month.get("cost_usd", 0.0))}',
+        "# HELP cc_window5h_pct 5h rolling window utilization percent of limit",
+        "# TYPE cc_window5h_pct gauge",
+        f'cc_window5h_pct {int(w.get("limit_pct", 0))}',
+        "# HELP cc_window5h_cost_usd 5h rolling window cost USD",
+        "# TYPE cc_window5h_cost_usd gauge",
+        f'cc_window5h_cost_usd {float(w.get("cost_usd", 0.0))}',
+        "# HELP cc_messages_total Assistant messages counted in current 5h window",
+        "# TYPE cc_messages_total gauge",
+        f'cc_messages_total {int(w.get("messages", 0))}',
+        "",
+    ]
+    return "\n".join(lines).encode("utf-8")
+
+
+def make_handler(cache: CachedAggregator, token: str, require_auth: bool, metrics_anon: bool):
     class Handler(BaseHTTPRequestHandler):
         def _send_json(self, code: int, payload: dict):
             body = json.dumps(payload).encode("utf-8")
@@ -306,14 +370,54 @@ def make_handler(cache: CachedAggregator):
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_unauthorized(self):
+            body = b'{"error":"unauthorized"}'
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("WWW-Authenticate", 'Bearer realm="cc-monitor"')
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authorized(self) -> bool:
+            if not require_auth:
+                return True
+            hdr = self.headers.get("Authorization", "")
+            if not hdr.startswith("Bearer "):
+                return False
+            return constant_time_eq(hdr[7:].strip(), token)
+
         def do_GET(self):  # noqa: N802
             if self.path.startswith("/usage"):
+                if not self._authorized():
+                    self._send_unauthorized()
+                    return
                 try:
                     data = cache.get()
                     self._send_json(200, data)
                 except Exception as e:
-                    self._send_json(500, {"error": str(e)})
+                    # Log dettagli server-side, risposta generica al client per
+                    # non leakare stack trace o path su LAN.
+                    sys.stderr.write(f"[error] /usage: {e!r}\n")
+                    self._send_json(500, {"error": "internal error"})
+            elif self.path == "/metrics":
+                if not (metrics_anon or self._authorized()):
+                    self._send_unauthorized()
+                    return
+                try:
+                    body = render_metrics(cache.get())
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; version=0.0.4")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception as e:
+                    sys.stderr.write(f"[error] /metrics: {e!r}\n")
+                    self._send_json(500, {"error": "internal error"})
             elif self.path == "/health":
+                # Liveness probe — sempre anonimo
                 self._send_json(200, {"ok": True})
             else:
                 self._send_json(404, {"error": "not found"})
@@ -352,6 +456,12 @@ def main():
     ap.add_argument("--plan-limit", type=float, default=None,
                     help="Override limite finestra 5h in USD (es. --plan-limit 200)")
     ap.add_argument("--ttl", type=float, default=2.0, help="Cache TTL secondi")
+    ap.add_argument("--token", default=None,
+                    help="Bearer token esplicito (salta generazione/persistenza)")
+    ap.add_argument("--no-auth", action="store_true",
+                    help="Disabilita autenticazione (sconsigliato, stampa warning)")
+    ap.add_argument("--metrics-anon", action="store_true",
+                    help="Espone /metrics senza autenticazione (per scraper Prometheus)")
     args = ap.parse_args()
 
     if not PROJECTS_DIR.exists():
@@ -362,7 +472,10 @@ def main():
     agg = Aggregator(pricing, args.budget, plan_limit)
     cache = CachedAggregator(agg, ttl_seconds=args.ttl)
 
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(cache))
+    require_auth = not args.no_auth
+    token = load_or_create_token(args.token) if require_auth else ""
+    handler_cls = make_handler(cache, token, require_auth, args.metrics_anon)
+    server = ThreadingHTTPServer((args.host, args.port), handler_cls)
     ip = local_ip()
     print(f"Claude Code Usage Bridge avviato")
     print(f"  ascolta su:   http://{args.host}:{args.port}")
@@ -372,9 +485,27 @@ def main():
     print(f"  TTL cache:    {args.ttl:.1f} s")
     print(f"  projects dir: {PROJECTS_DIR}")
     print()
-    print(f"Su ESP32, in secrets.h imposta:")
-    print(f"    #define BRIDGE_HOST  \"{ip}\"")
-    print(f"    #define BRIDGE_PORT  {args.port}")
+    if require_auth:
+        short = (token[:4] + "..." + token[-4:]) if len(token) > 10 else token
+        print(f"  auth:         bearer (token persistito in {TOKEN_PATH})")
+        print(f"  token:        {token}")
+        print(f"  short:        {short}")
+        print()
+        print(f"Su ESP32, in secrets.h (o nel captive portal) imposta:")
+        print(f"    #define BRIDGE_HOST   \"{ip}\"")
+        print(f"    #define BRIDGE_PORT   {args.port}")
+        print(f"    #define BRIDGE_TOKEN  \"{token}\"")
+        print()
+        print(f"Test rapido:")
+        print(f"    curl -H 'Authorization: Bearer {short}' http://{ip}:{args.port}/usage")
+    else:
+        print(f"  auth:         DISABILITATA (--no-auth)")
+        print(f"  WARNING: chiunque sulla rete può leggere il tuo consumo Claude Code.")
+        print(f"  Usa solo per debug locale, mai esposto a LAN/Internet.")
+        print()
+        print(f"Su ESP32, in secrets.h imposta:")
+        print(f"    #define BRIDGE_HOST  \"{ip}\"")
+        print(f"    #define BRIDGE_PORT  {args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

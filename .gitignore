@@ -4,6 +4,9 @@ firmware/src/secrets.h
 .env.local
 *.pem
 *.key
+*.token
+bridge/.token
+.claude-code-usage/
 
 # ===== PlatformIO =====
 .pio/

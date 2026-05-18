@@ -10,6 +10,7 @@ static UsageData s_data {};
 static SemaphoreHandle_t s_mutex = nullptr;
 
 static String s_host;
+static String s_token;
 static uint16_t s_port = 8787;
 static uint32_t s_interval_ms = 5000;
 
@@ -43,7 +44,15 @@ static bool fetch_once(UsageData& tmp) {
     Serial.println("[UsageClient] http.begin failed");
     return false;
   }
+  if (s_token.length() > 0) {
+    http.addHeader("Authorization", String("Bearer ") + s_token);
+  }
   int code = http.GET();
+  if (code == 401) {
+    Serial.println("[UsageClient] HTTP 401 — bridge ha rifiutato il token, controlla BRIDGE_TOKEN");
+    http.end();
+    return false;
+  }
   if (code != 200) {
     Serial.printf("[UsageClient] HTTP %d\n", code);
     http.end();
@@ -131,14 +140,18 @@ static void poll_task(void*) {
   }
 }
 
-void UsageClient_Begin(const char* host, uint16_t port, uint32_t interval_ms) {
+void UsageClient_Begin(const char* host, uint16_t port, uint32_t interval_ms,
+                       const char* token) {
   s_host = host;
   s_port = port;
   s_interval_ms = interval_ms;
+  s_token = token ? token : "";
   if (!s_mutex) s_mutex = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(poll_task, "usage_poll", 8192, nullptr, 1, nullptr, 0);
-  Serial.printf("[UsageClient] polling http://%s:%u/usage ogni %u ms\n",
-                host, (unsigned)port, (unsigned)interval_ms);
+  // Non logghiamo MAI il token su Serial.
+  Serial.printf("[UsageClient] polling http://%s:%u/usage ogni %u ms (auth %s)\n",
+                host, (unsigned)port, (unsigned)interval_ms,
+                s_token.length() > 0 ? "ON" : "OFF");
 }
 
 void UsageClient_Snapshot(UsageData& out) {

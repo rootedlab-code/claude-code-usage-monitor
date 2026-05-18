@@ -48,7 +48,9 @@ struct UsageData {
 
 // Avvia un task FreeRTOS dedicato che fa polling del bridge.
 // host: es. "192.168.1.42", port: 8787, interval_ms: cadenza poll
-void UsageClient_Begin(const char* host, uint16_t port, uint32_t interval_ms);
+// token: bearer token bridge (stringa vuota => header omesso, compatibilità v0.1)
+void UsageClient_Begin(const char* host, uint16_t port, uint32_t interval_ms,
+                       const char* token = "");
 
 // Copia atomicamente l'ultimo snapshot in out. Sicuro da chiamare dal thread UI.
 void UsageClient_Snapshot(UsageData& out);
