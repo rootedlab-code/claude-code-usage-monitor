@@ -74,18 +74,20 @@ Should adapt to other ESP32-S3 boards with an ST7789 by tweaking pins in
 
 ## Display in action
 
-Real photos from the running firmware (the board is normally read with the
-USB connector to one side — 320×172 effective landscape):
+Real photos from a running v0.2 board (1.47" ST7789, the device is normally
+held with the USB connector to one side — 320×172 effective landscape).
+These were taken in OFFLINE state so the values show `$0.00` / `0%` and the
+status bar reads `OFFLINE` — the point is the layout, not the data.
 
-| Cost view | 7-day chart | Model breakdown |
-|:---:|:---:|:---:|
-| ![today and month cost](docs/screenshots/display-cost.jpg) | ![last 7 days bar chart](docs/screenshots/display-7days.jpg) | ![per-model cost](docs/screenshots/display-models.jpg) |
-| `OGGI $58.01` / `MESE $193.40` | `ULTIMI 7 GIORNI` with auto-scaled bars | `Opus 4.7` vs `Haiku 4.5` with proportional bars |
+| Costo | Finestra 5h |
+|:---:|:---:|
+| ![cost tab — today and month](docs/screenshots/display-cost.jpg) | ![5h window — percentage + two bars](docs/screenshots/display-window5h.jpg) |
+| `$ OGGI` headline + `MESE` + `in attesa di dati` footer | `0%` headline + `Tempo` (violet) + `Limite` (green→amber→red) bars + status text |
 
-> Photos are from v0.1. v0.2 keeps the same overall layout but adds a boot
-> splash, a unified accent palette (green / cyan / amber / red / violet),
-> icons in every tab header, a sparkline + "ieri" line on the cost tab, and
-> dual progress bars on the 5h tab. New screenshots coming soon.
+| Ultimi 7 giorni | Modelli (Mese) |
+|:---:|:---:|
+| ![7-day chart](docs/screenshots/display-7days.jpg) | ![per-model breakdown](docs/screenshots/display-models.jpg) |
+| `ULTIMI 7 GIORNI` with auto-scaled bars | `MODELLI (MESE)` — empty here ("Nessun dato"), normally lists top 5 |
 
 Status bar at the top is always visible (`WIFI ONLINE` / `WIFI OFFLINE` with
 status dot + bridge endpoint), and the onboard RGB LED mirrors connection
